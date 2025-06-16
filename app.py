@@ -42,12 +42,12 @@ def categorize_video_source(url):
     Prioritizes embed detection for common providers that use iframe embeds.
     """
     if not isinstance(url, str): # Ensure url is a string before calling .lower()
-        print(f"  Warning: Expected string URL for categorization, got {type(url)}: {url}")
+        print(f"  Warning: Categorization received non-string URL: {type(url)} - {url}")
         return "unknown" # Cannot categorize non-string URLs
 
     url_lower = url.lower()
 
-    # Common embed patterns
+    # Common embed patterns (prioritized)
     embed_patterns = [
         r'embed', r'yourupload\.com', r'streamwish\.to', r'streame\.net',
         r'streamtape\.com', r'fembed\.com', r'natu\.moe', r'ok\.ru', r'my\.mail\.ru',
@@ -58,7 +58,7 @@ def categorize_video_source(url):
             print(f"  Source categorized as 'embed': {url}")
             return "embed"
 
-    # Common direct video extensions (order matters for efficiency)
+    # Common direct video extensions
     direct_patterns = [r'\.mp4', r'\.webm', r'\.ogg', r'\.mkv', r'\.avi', r'\.mov']
     for pattern in direct_patterns:
         if re.search(pattern, url_lower):
@@ -196,73 +196,73 @@ def get_video_sources_endpoint(anime_id, episode_number):
     with AnimeFLV() as api:
         try:
             print(f"Getting raw video sources for '{anime_id}' episode {episode_number} (Format: {video_format_str})")
-            raw_servers = api.get_video_servers(id=anime_id, episode=episode_number, format=video_format)
+            raw_servers_output = api.get_video_servers(id=anime_id, episode=episode_number, format=video_format)
             
             structured_sources = []
-            
-            # Ensure raw_servers is processed to extract only URL strings
-            # The AnimeFLV library's get_video_servers can return complex, nested structures.
-            # This logic aims to flatten and extract valid URL strings from those structures.
             extracted_urls = []
-            if isinstance(raw_servers, list):
-                for item in raw_servers:
-                    if isinstance(item, list): # If it's a list of URLs (e.g., from SUB/LAT)
-                        for url_item in item:
-                            if isinstance(url_item, str):
-                                extracted_urls.append(url_item)
-                            elif isinstance(url_item, dict) and 'url' in url_item and isinstance(url_item['url'], str):
-                                extracted_urls.append(url_item['url'])
-                            elif isinstance(url_item, dict) and 'code' in url_item and isinstance(url_item['code'], str):
-                                extracted_urls.append(url_item['code'])
+
+            # --- Robustly extract URL strings from various possible return types of get_video_servers ---
+            if isinstance(raw_servers_output, list):
+                for item in raw_servers_output:
+                    if isinstance(item, list): # Often a list of URLs (e.g., from SUB/LAT)
+                        for url_val in item:
+                            if isinstance(url_val, str):
+                                extracted_urls.append(url_val)
+                            elif isinstance(url_val, dict) and 'url' in url_val and isinstance(url_val['url'], str):
+                                extracted_urls.append(url_val['url'])
+                            elif isinstance(url_val, dict) and 'code' in url_val and isinstance(url_val['code'], str):
+                                extracted_urls.append(url_val['code'])
                             else:
-                                print(f"  Warning: List item in raw_servers is not a string or dict with 'url'/'code': {type(url_item)} - {url_item}")
-                    elif isinstance(item, str): # If it's a direct URL string
+                                print(f"  Warning: Nested list item not string/dict with url/code: {type(url_val)} - {url_val}")
+                    elif isinstance(item, str): # Direct string URL
                         extracted_urls.append(item)
-                    elif isinstance(item, dict): # If it's a dictionary like {'code': 'url', 'server': 'name'}
-                        # Prioritize 'code' then 'url' field if they are strings
+                    elif isinstance(item, dict): # Dictionary with 'code' or 'url' fields
                         if 'code' in item and isinstance(item['code'], str):
                             extracted_urls.append(item['code'])
                         elif 'url' in item and isinstance(item['url'], str):
                             extracted_urls.append(item['url'])
                         else:
-                            print(f"  Warning: Dictionary item in raw_servers has no valid 'code' or 'url' field: {item}")
+                            print(f"  Warning: Dictionary item has no valid 'code' or 'url' field: {item}")
                     else:
-                        print(f"  Warning: Unexpected item type in raw_servers list: {type(item)} - {item}")
-            elif isinstance(raw_servers, dict):
-                # If raw_servers is a dict, it might be like {"SUB": "url", "LAT": ["url1", "url2"]}
-                for key, value in raw_servers.items():
+                        print(f"  Warning: Unexpected item type in top-level list: {type(item)} - {item}")
+            elif isinstance(raw_servers_output, dict):
+                # If raw_servers_output is a dict, it might be like {"SUB": "url", "LAT": ["url1", "url2"]}
+                for key, value in raw_servers_output.items():
                     if isinstance(value, list):
-                        for url_item in value:
-                            if isinstance(url_item, str):
-                                extracted_urls.append(url_item)
-                            elif isinstance(url_item, dict) and 'url' in url_item and isinstance(url_item['url'], str):
-                                extracted_urls.append(url_item['url'])
-                            elif isinstance(url_item, dict) and 'code' in url_item and isinstance(url_item['code'], str):
-                                extracted_urls.append(url_item['code'])
+                        for url_val in value:
+                            if isinstance(url_val, str):
+                                extracted_urls.append(url_val)
+                            elif isinstance(url_val, dict) and 'url' in url_val and isinstance(url_val['url'], str):
+                                extracted_urls.append(url_val['url'])
+                            elif isinstance(url_val, dict) and 'code' in url_val and isinstance(url_val['code'], str):
+                                extracted_urls.append(url_val['code'])
                             else:
-                                print(f"  Warning: List item in dict value is not a string or dict with 'url'/'code': {type(url_item)} - {url_item}")
+                                print(f"  Warning: List item in dict value not string/dict with url/code: {type(url_val)} - {url_val}")
                     elif isinstance(value, str):
                         extracted_urls.append(value)
-                    elif isinstance(value, dict) and 'url' in value and isinstance(value['url'], str):
-                        extracted_urls.append(value['url'])
-                    elif isinstance(value, dict) and 'code' in value and isinstance(value['code'], str):
-                        extracted_urls.append(value['code'])
+                    elif isinstance(value, dict): # If dict value is itself a dict
+                         if 'code' in value and isinstance(value['code'], str):
+                            extracted_urls.append(value['code'])
+                         elif 'url' in value and isinstance(value['url'], str):
+                            extracted_urls.append(value['url'])
+                         else:
+                            print(f"  Warning: Dict value in dict has no valid 'code' or 'url' field: {value}")
                     else:
                         print(f"  Warning: Unexpected type in dict value for key {key}: {type(value)} - {value}")
             else:
-                print(f"  Warning: Top-level raw_servers is neither list nor dict: {type(raw_servers)} - {raw_servers}")
+                print(f"  Warning: Top-level raw_servers_output is neither list nor dict: {type(raw_servers_output)} - {raw_servers_output}")
 
 
-            # Now categorize the extracted pure URLs
+            # Now categorize the extracted pure URL strings
             for url in extracted_urls:
-                if isinstance(url, str): # Final check to ensure it's a string before categorizing
+                if isinstance(url, str) and url.strip(): # Final check: must be a non-empty string
                     source_type = categorize_video_source(url)
                     structured_sources.append({
                         "type": source_type,
                         "url": url
                     })
                 else:
-                    print(f"  Warning: Non-string URL found after extraction: {type(url)} - {url}")
+                    print(f"  Warning: Extracted non-string or empty URL: {type(url)} - {url}")
 
 
             serializable_sources = {"sources": structured_sources}

@@ -42,7 +42,7 @@ def categorize_video_source(url):
     Prioritizes embed detection for common providers that use iframe embeds.
     """
     if not isinstance(url, str): # Ensure url is a string before calling .lower()
-        print(f"  Warning: Expected string URL, got {type(url)}: {url}")
+        print(f"  Warning: Expected string URL for categorization, got {type(url)}: {url}")
         return "unknown" # Cannot categorize non-string URLs
 
     url_lower = url.lower()
@@ -51,7 +51,7 @@ def categorize_video_source(url):
     embed_patterns = [
         r'embed', r'yourupload\.com', r'streamwish\.to', r'streame\.net',
         r'streamtape\.com', r'fembed\.com', r'natu\.moe', r'ok\.ru', r'my\.mail\.ru',
-        r'mega\.nz' # Mega links are often direct downloads but their embed can be used in iframes
+        r'mega\.nz/embed' # Specifically mega.nz/embed for iframe
     ]
     for pattern in embed_patterns:
         if re.search(pattern, url_lower):
@@ -199,45 +199,70 @@ def get_video_sources_endpoint(anime_id, episode_number):
             raw_servers = api.get_video_servers(id=anime_id, episode=episode_number, format=video_format)
             
             structured_sources = []
-            if isinstance(raw_servers, list): # Ensure raw_servers is a list before iterating
-                for sublist in raw_servers:
-                    # Ensure sublist is iterable (e.g., if it's a single string it'll fail iteration)
-                    if isinstance(sublist, list):
-                        for raw_url in sublist:
-                            source_type = categorize_video_source(raw_url)
-                            structured_sources.append({
-                                "type": source_type,
-                                "url": raw_url
-                            })
-                    elif isinstance(sublist, str): # Handle case where it might be a direct string
-                        source_type = categorize_video_source(sublist)
-                        structured_sources.append({
-                            "type": source_type,
-                            "url": sublist
-                        })
-                    else: # Log unexpected types
-                        print(f"  Warning: Unexpected item type in raw_servers list: {type(sublist)} - {sublist}")
-            elif isinstance(raw_servers, dict): # Handle case where it's a dict
-                # If the raw_servers response is a dictionary, it might be structured like
-                # {"SUB": ["url1", "url2"], "LAT": ["url3"]}
-                for key, urls in raw_servers.items():
-                    if isinstance(urls, list):
-                        for raw_url in urls:
-                            source_type = categorize_video_source(raw_url)
-                            structured_sources.append({
-                                "type": source_type,
-                                "url": raw_url,
-                                "format": key # Add format info if coming from dict
-                            })
-                    elif isinstance(urls, str): # Single URL directly under SUB/LAT
-                        source_type = categorize_video_source(urls)
-                        structured_sources.append({
-                            "type": source_type,
-                            "url": urls,
-                            "format": key
-                        })
+            
+            # Ensure raw_servers is processed to extract only URL strings
+            # The AnimeFLV library's get_video_servers can return complex, nested structures.
+            # This logic aims to flatten and extract valid URL strings from those structures.
+            extracted_urls = []
+            if isinstance(raw_servers, list):
+                for item in raw_servers:
+                    if isinstance(item, list): # If it's a list of URLs (e.g., from SUB/LAT)
+                        for url_item in item:
+                            if isinstance(url_item, str):
+                                extracted_urls.append(url_item)
+                            elif isinstance(url_item, dict) and 'url' in url_item and isinstance(url_item['url'], str):
+                                extracted_urls.append(url_item['url'])
+                            elif isinstance(url_item, dict) and 'code' in url_item and isinstance(url_item['code'], str):
+                                extracted_urls.append(url_item['code'])
+                            else:
+                                print(f"  Warning: List item in raw_servers is not a string or dict with 'url'/'code': {type(url_item)} - {url_item}")
+                    elif isinstance(item, str): # If it's a direct URL string
+                        extracted_urls.append(item)
+                    elif isinstance(item, dict): # If it's a dictionary like {'code': 'url', 'server': 'name'}
+                        # Prioritize 'code' then 'url' field if they are strings
+                        if 'code' in item and isinstance(item['code'], str):
+                            extracted_urls.append(item['code'])
+                        elif 'url' in item and isinstance(item['url'], str):
+                            extracted_urls.append(item['url'])
+                        else:
+                            print(f"  Warning: Dictionary item in raw_servers has no valid 'code' or 'url' field: {item}")
+                    else:
+                        print(f"  Warning: Unexpected item type in raw_servers list: {type(item)} - {item}")
+            elif isinstance(raw_servers, dict):
+                # If raw_servers is a dict, it might be like {"SUB": "url", "LAT": ["url1", "url2"]}
+                for key, value in raw_servers.items():
+                    if isinstance(value, list):
+                        for url_item in value:
+                            if isinstance(url_item, str):
+                                extracted_urls.append(url_item)
+                            elif isinstance(url_item, dict) and 'url' in url_item and isinstance(url_item['url'], str):
+                                extracted_urls.append(url_item['url'])
+                            elif isinstance(url_item, dict) and 'code' in url_item and isinstance(url_item['code'], str):
+                                extracted_urls.append(url_item['code'])
+                            else:
+                                print(f"  Warning: List item in dict value is not a string or dict with 'url'/'code': {type(url_item)} - {url_item}")
+                    elif isinstance(value, str):
+                        extracted_urls.append(value)
+                    elif isinstance(value, dict) and 'url' in value and isinstance(value['url'], str):
+                        extracted_urls.append(value['url'])
+                    elif isinstance(value, dict) and 'code' in value and isinstance(value['code'], str):
+                        extracted_urls.append(value['code'])
+                    else:
+                        print(f"  Warning: Unexpected type in dict value for key {key}: {type(value)} - {value}")
             else:
-                print(f"  Warning: Unexpected type for raw_servers: {type(raw_servers)} - {raw_servers}")
+                print(f"  Warning: Top-level raw_servers is neither list nor dict: {type(raw_servers)} - {raw_servers}")
+
+
+            # Now categorize the extracted pure URLs
+            for url in extracted_urls:
+                if isinstance(url, str): # Final check to ensure it's a string before categorizing
+                    source_type = categorize_video_source(url)
+                    structured_sources.append({
+                        "type": source_type,
+                        "url": url
+                    })
+                else:
+                    print(f"  Warning: Non-string URL found after extraction: {type(url)} - {url}")
 
 
             serializable_sources = {"sources": structured_sources}
@@ -313,3 +338,34 @@ def get_latest_animes_endpoint():
 
 if __name__ == '__main__':
     app.run(debug=True, port=5000)
+```
+The error you're seeing in the screenshot: "Cannot play unknown source type: unknown (URL: [object Object])" indicates an issue in the **backend API's processing of video sources.** It's an **API fault**.
+
+Specifically, it means:
+* Your backend Flask API is receiving data from the `animeflv` library's `get_video_servers()` call where a URL string is expected, but it's getting a JavaScript `Object` (or a Python dictionary, which gets converted to a JavaScript Object).
+* Your frontend JavaScript then receives this `Object` in the `url` field and correctly flags it as "unknown" because it cannot interpret an object as a URL string.
+
+This is happening because the `animeflv` library's response structure for video servers can sometimes be more complex or varied than initially handled by your API, returning nested dictionaries or inconsistent formats.
+
+To fix this, I have updated the `animeflv-flask-api` immersive to make the video source extraction logic in `get_video_sources_endpoint` even more robust.
+
+**Key Changes in `animeflv-flask-api` (`app.py`):**
+
+* **Improved Video Source Extraction:** The logic in `get_video_sources_endpoint` is now more comprehensive in how it flattens and extracts URLs from the `raw_servers` data received from the `animeflv` library. It now explicitly checks for:
+    * Lists of strings.
+    * Lists of dictionaries that contain `"url"` or `"code"` keys.
+    * Top-level dictionaries containing lists of URLs.
+    * It aims to guarantee that only actual URL strings are put into the `extracted_urls` list, which then gets categorized.
+* **More Specific Warnings:** Added additional `print` statements to your API's console logs to help you see exactly what type of unexpected data structures are being received from the `animeflv` library, which will be useful for future debugging if `animeflv.net` changes its structure again.
+
+**To apply this fix:**
+
+1.  **Update your `app.py` file:** Copy the entire code from the `animeflv-flask-api` immersive above and paste it into your `app.py` file, overwriting the old content.
+2.  **Redeploy your Flask API to Render:** Since the change is in the backend, you need to redeploy it.
+    * Commit your updated `app.py` to your GitHub repository.
+    * Go to your Render dashboard for the `animeflv-api-backend` service.
+    * Manually trigger a deploy (or wait for Render's auto-deploy if configured).
+3.  **Test your API again:** Once the Render deployment is "Live" again, try accessing `https://animeflv-api-backend.onrender.com/api/video-sources/nanatsu-no-taizai/1` in your browser. This should now return a cleaner JSON structure where the `"url"` fields in the `sources` array contain actual string URLs.
+4.  **Test the frontend again:** After the API is updated, load your `index.html` (frontend) and try playing an episode.
+
+This robust extraction should resolve the `[object Object]` error and allow your frontend to correctly display and attempt to play the video sourc

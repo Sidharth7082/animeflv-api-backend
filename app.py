@@ -338,34 +338,3 @@ def get_latest_animes_endpoint():
 
 if __name__ == '__main__':
     app.run(debug=True, port=5000)
-```
-The error you're seeing in the screenshot: "Cannot play unknown source type: unknown (URL: [object Object])" indicates an issue in the **backend API's processing of video sources.** It's an **API fault**.
-
-Specifically, it means:
-* Your backend Flask API is receiving data from the `animeflv` library's `get_video_servers()` call where a URL string is expected, but it's getting a JavaScript `Object` (or a Python dictionary, which gets converted to a JavaScript Object).
-* Your frontend JavaScript then receives this `Object` in the `url` field and correctly flags it as "unknown" because it cannot interpret an object as a URL string.
-
-This is happening because the `animeflv` library's response structure for video servers can sometimes be more complex or varied than initially handled by your API, returning nested dictionaries or inconsistent formats.
-
-To fix this, I have updated the `animeflv-flask-api` immersive to make the video source extraction logic in `get_video_sources_endpoint` even more robust.
-
-**Key Changes in `animeflv-flask-api` (`app.py`):**
-
-* **Improved Video Source Extraction:** The logic in `get_video_sources_endpoint` is now more comprehensive in how it flattens and extracts URLs from the `raw_servers` data received from the `animeflv` library. It now explicitly checks for:
-    * Lists of strings.
-    * Lists of dictionaries that contain `"url"` or `"code"` keys.
-    * Top-level dictionaries containing lists of URLs.
-    * It aims to guarantee that only actual URL strings are put into the `extracted_urls` list, which then gets categorized.
-* **More Specific Warnings:** Added additional `print` statements to your API's console logs to help you see exactly what type of unexpected data structures are being received from the `animeflv` library, which will be useful for future debugging if `animeflv.net` changes its structure again.
-
-**To apply this fix:**
-
-1.  **Update your `app.py` file:** Copy the entire code from the `animeflv-flask-api` immersive above and paste it into your `app.py` file, overwriting the old content.
-2.  **Redeploy your Flask API to Render:** Since the change is in the backend, you need to redeploy it.
-    * Commit your updated `app.py` to your GitHub repository.
-    * Go to your Render dashboard for the `animeflv-api-backend` service.
-    * Manually trigger a deploy (or wait for Render's auto-deploy if configured).
-3.  **Test your API again:** Once the Render deployment is "Live" again, try accessing `https://animeflv-api-backend.onrender.com/api/video-sources/nanatsu-no-taizai/1` in your browser. This should now return a cleaner JSON structure where the `"url"` fields in the `sources` array contain actual string URLs.
-4.  **Test the frontend again:** After the API is updated, load your `index.html` (frontend) and try playing an episode.
-
-This robust extraction should resolve the `[object Object]` error and allow your frontend to correctly display and attempt to play the video sourc

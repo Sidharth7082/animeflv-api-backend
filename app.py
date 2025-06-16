@@ -41,6 +41,10 @@ def categorize_video_source(url):
     Analyzes a video URL and categorizes it as 'direct', 'embed', or 'unknown'.
     Prioritizes embed detection for common providers that use iframe embeds.
     """
+    if not isinstance(url, str): # Ensure url is a string before calling .lower()
+        print(f"  Warning: Expected string URL, got {type(url)}: {url}")
+        return "unknown" # Cannot categorize non-string URLs
+
     url_lower = url.lower()
 
     # Common embed patterns
@@ -176,14 +180,6 @@ def get_anime_info_endpoint(anime_id):
 
 @app.route('/api/video-sources/<string:anime_id>/<int:episode_number>', methods=['GET'])
 def get_video_sources_endpoint(anime_id, episode_number):
-    """
-    Gets video streaming/download links for a specific anime episode.
-    Path parameters:
-    - anime_id: The ID of the anime (e.g., "nanatsu-no-taizai").
-    - episode_number: The episode number (e.g., 1).
-    Query parameters:
-    - format: (Optional) "subtitled" or "dubbed". Defaults to "subtitled".
-    """
     video_format_str = request.args.get('format', 'subtitled').lower()
     video_format = EpisodeFormat.Subtitled
 
@@ -203,13 +199,46 @@ def get_video_sources_endpoint(anime_id, episode_number):
             raw_servers = api.get_video_servers(id=anime_id, episode=episode_number, format=video_format)
             
             structured_sources = []
-            for sublist in raw_servers:
-                for raw_url in sublist:
-                    source_type = categorize_video_source(raw_url)
-                    structured_sources.append({
-                        "type": source_type,
-                        "url": raw_url
-                    })
+            if isinstance(raw_servers, list): # Ensure raw_servers is a list before iterating
+                for sublist in raw_servers:
+                    # Ensure sublist is iterable (e.g., if it's a single string it'll fail iteration)
+                    if isinstance(sublist, list):
+                        for raw_url in sublist:
+                            source_type = categorize_video_source(raw_url)
+                            structured_sources.append({
+                                "type": source_type,
+                                "url": raw_url
+                            })
+                    elif isinstance(sublist, str): # Handle case where it might be a direct string
+                        source_type = categorize_video_source(sublist)
+                        structured_sources.append({
+                            "type": source_type,
+                            "url": sublist
+                        })
+                    else: # Log unexpected types
+                        print(f"  Warning: Unexpected item type in raw_servers list: {type(sublist)} - {sublist}")
+            elif isinstance(raw_servers, dict): # Handle case where it's a dict
+                # If the raw_servers response is a dictionary, it might be structured like
+                # {"SUB": ["url1", "url2"], "LAT": ["url3"]}
+                for key, urls in raw_servers.items():
+                    if isinstance(urls, list):
+                        for raw_url in urls:
+                            source_type = categorize_video_source(raw_url)
+                            structured_sources.append({
+                                "type": source_type,
+                                "url": raw_url,
+                                "format": key # Add format info if coming from dict
+                            })
+                    elif isinstance(urls, str): # Single URL directly under SUB/LAT
+                        source_type = categorize_video_source(urls)
+                        structured_sources.append({
+                            "type": source_type,
+                            "url": urls,
+                            "format": key
+                        })
+            else:
+                print(f"  Warning: Unexpected type for raw_servers: {type(raw_servers)} - {raw_servers}")
+
 
             serializable_sources = {"sources": structured_sources}
             set_cached_data(cache_key, serializable_sources)

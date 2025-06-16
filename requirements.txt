@@ -1,0 +1,7 @@
+Flask
+Flask-Cors
+animeflv
+cloudscraper
+beautifulsoup4
+lxml
+gunicorn  # Add Gunicorn for the production server

@@ -303,7 +303,7 @@ def unified_detail(source_type, item_id):
                     "source": "Jikan",
                     "content_type": jikan_data.get('type') or "anime",
                     "title": jikan_data.get('title_english') or jikan_data.get('title'),
-                    "mal_id": jikan_data.get('mal_id'),
+                    "mal_id": item_id, # Use original item_id
                     "imdb_id": imdb_id,
                     "tmdb_id": tmdb_id,
                     "image_url": jikan_data.get('images', {}).get('jpg', {}).get('large_image_url'),
@@ -337,29 +337,70 @@ def unified_detail(source_type, item_id):
                 "source": "IMDbAPI",
                 "content_type": imdb_data.get('titleType', {}).get('text'),
                 "title": imdb_data.get('titleText', {}).get('text'),
-                "imdb_id": imdb_data.get('id'),
+                "imdb_id": item_id, # Use original item_id
                 "tmdb_id": tmdb_id_from_imdb, # Extract TMDB ID
                 "image_url": imdb_data.get('primaryImage', {}).get('url'),
                 "synopsis": imdb_data.get('plot', {}).get('plotText', {}).get('text'),
                 "episodes_count": imdb_data.get('numberOfEpisodes'), # For TV series
                 "release_year": imdb_data.get('releaseYear', {}).get('year'),
                 "genres": [g.get('text') for g in imdb_data.get('genres', {}).get('genres', []) if g.get('text')],
-                "status": imdb_data.get('seriesEndYear', {}).get('year') if imdb_data.get('titleType', {}).get('text') == 'tvSeries' else None, # Simplified status
+                "status": imdb_data.get('seriesEndYear', {}).get('year') if imdb_data.get('titleType', {}).get('text') == 'tvSeries' else None,
                 "score": imdb_data.get('ratingsSummary', {}).get('aggregateRating')
             }
         except requests.exceptions.RequestException as e:
             print(f"ERROR: IMDbAPI detail API failed for Title ID {item_id}: {e}")
-            # If IMDbAPI fails, attempt to fall back to TMDB if TMDB_API_KEY is configured
+            # Fallback to TMDB if IMDbAPI fails and TMDB API Key is configured
             if TMDB_API_KEY != "YOUR_TMDB_API_KEY_HERE":
-                # To fall back to TMDB, we need the TMDB ID and content type.
-                # If we're here, IMDbAPI failed. The original unified_search should have provided TMDB ID.
-                # So, the frontend should try requesting TMDB directly if it has the TMDB ID and type.
-                return jsonify({"error": f"Failed to get IMDbAPI details: {str(e)}", "details": "Could not fetch data from IMDbAPI. Frontend can try TMDB if ID available and API key configured.", "status": 500}), 500
+                # Assuming item_id is IMDB ID, we need to convert or search TMDB with IMDB ID.
+                # For this direct fallback, we'll try to get TMDB details by IMDB ID.
+                # TMDB 'find' endpoint can find by external IDs.
+                try:
+                    # TMDB find by external ID (IMDB ID) to get TMDB ID and type
+                    find_url = f"{TMDB_API_BASE}/find/{item_id}?api_key={TMDB_API_KEY}&external_source=imdb_id"
+                    find_response = requests.get(find_url)
+                    find_response.raise_for_status()
+                    find_data = find_response.json()
+
+                    tmdb_item = None
+                    if find_data.get('movie_results'): tmdb_item = find_data['movie_results'][0] if find_data['movie_results'] else None
+                    elif find_data.get('tv_results'): tmdb_item = find_data['tv_results'][0] if find_data['tv_results'] else None
+
+                    if tmdb_item:
+                        tmdb_id_from_find = tmdb_item.get('id')
+                        tmdb_content_type = 'movie' if find_data.get('movie_results') else 'tv'
+                        
+                        # Now get full TMDB details using the found TMDB ID and type
+                        tmdb_detail_response = requests.get(f"{TMDB_API_BASE}/{tmdb_content_type}/{tmdb_id_from_find}?api_key={TMDB_API_KEY}")
+                        tmdb_detail_response.raise_for_status()
+                        tmdb_detail_data = tmdb_detail_response.json()
+
+                        detail_data = {
+                            "source": "TMDB",
+                            "content_type": tmdb_content_type,
+                            "title": tmdb_detail_data.get('title') or tmdb_detail_data.get('name'),
+                            "imdb_id": item_id, # Original IMDB ID
+                            "tmdb_id": tmdb_id_from_find,
+                            "image_url": f"https://image.tmdb.org/t/p/original{tmdb_detail_data.get('poster_path')}" if tmdb_detail_data.get('poster_path') else None,
+                            "synopsis": tmdb_detail_data.get('overview'),
+                            "episodes_count": tmdb_detail_data.get('number_of_episodes') if tmdb_content_type == 'tv' else None,
+                            "release_year": tmdb_detail_data.get('release_date', '').split('-')[0] if tmdb_content_type == 'movie' else tmdb_detail_data.get('first_air_date', '').split('-')[0],
+                            "genres": [g.get('name') for g in tmdb_detail_data.get('genres', []) if g.get('name')],
+                            "status": tmdb_detail_data.get('status'),
+                            "score": tmdb_detail_data.get('vote_average')
+                        }
+                        print(f"INFO: Fallback to TMDB successful for IMDB ID {item_id}.")
+                        set_cached_data(cache_key, detail_data) # Cache TMDB fallback data under IMDBAPI key
+                        return jsonify(detail_data)
+                    else:
+                        print(f"WARNING: TMDB find by IMDB ID {item_id} did not return results.")
+                        return jsonify({"error": f"Failed to get IMDbAPI details: {str(e)}", "details": "IMDbAPI failed and TMDB fallback found no match.", "status": 500}), 500
+                except requests.exceptions.RequestException as tmdb_fallback_e:
+                    print(f"ERROR: TMDB fallback failed for IMDB ID {item_id}: {tmdb_fallback_e}")
+                    return jsonify({"error": f"Failed to get IMDbAPI details; TMDB fallback also failed: {str(tmdb_fallback_e)}", "details": "Both APIs failed. Check IDs or API keys.", "status": 500}), 500
             else:
                 return jsonify({"error": f"Failed to get IMDbAPI details: {str(e)}", "details": "Could not fetch data from IMDbAPI. TMDB fallback not configured.", "status": 500}), 500
     
     elif source_type == 'TMDB':
-        # Direct call for TMDB details, requires item_id (TMDB ID) and content_type ('movie' or 'tv')
         content_type_param = request.args.get('content_type_param') 
         if not content_type_param or content_type_param not in ['movie', 'tv']:
             return jsonify({"error": "Missing or invalid 'content_type_param' for TMDB detail. Must be 'movie' or 'tv'.", "details": "Frontend must provide content type for TMDB API.", "status": 400}), 400
@@ -371,7 +412,7 @@ def unified_detail(source_type, item_id):
             tmdb_data = response.json()
 
             imdb_id_from_tmdb = None
-            try: # Attempt to get IMDB ID from TMDB external_ids (optional call)
+            try:
                 external_ids_response = requests.get(f"{TMDB_API_BASE}/{content_type_param}/{item_id}/external_ids?api_key={TMDB_API_KEY}")
                 external_ids_response.raise_for_status()
                 external_ids_data = external_ids_response.json()
@@ -382,12 +423,12 @@ def unified_detail(source_type, item_id):
             detail_data = {
                 "source": "TMDB",
                 "content_type": content_type_param,
-                "title": tmdb_data.get('title') or tmdb_data.get('name'), # 'title' for movies, 'name' for TV
-                "imdb_id": imdb_id_from_tmdb, # Extracted IMDB ID
-                "tmdb_id": tmdb_data.get('id'),
+                "title": tmdb_data.get('title') or tmdb_data.get('name'),
+                "imdb_id": imdb_id_from_tmdb,
+                "tmdb_id": item_id,
                 "image_url": f"https://image.tmdb.org/t/p/original{tmdb_data.get('poster_path')}" if tmdb_data.get('poster_path') else None,
                 "synopsis": tmdb_data.get('overview'),
-                "episodes_count": tmdb_data.get('number_of_episodes') if content_type_param == 'tv' else None, # Only for TV
+                "episodes_count": tmdb_data.get('number_of_episodes') if content_type_param == 'tv' else None,
                 "release_year": tmdb_data.get('release_date', '').split('-')[0] if content_type_param == 'movie' else tmdb_data.get('first_air_date', '').split('-')[0],
                 "genres": [g.get('name') for g in tmdb_data.get('genres', []) if g.get('name')],
                 "status": tmdb_data.get('status'),
@@ -572,7 +613,7 @@ def get_video_sources_endpoint(anime_id, episode_number):
             return jsonify(serializable_sources)
         except CloudflareChallengeError:
             print(f"ERROR: Cloudflare challenge encountered for video sources '{anime_id}' episode {episode_number}.")
-            return jsonify({"error": "Cloudflare challenge detected. Unable to bypass for this request. Streaming might be temporarily unavailable.", "details": "The target website is actively challenging the scraper."}), 503
+            return jsonify({"error": "Cloudflare challenge detected. Unable to bypass for this request. Please try again later.", "details": "The target website is actively challenging the scraper."}), 503
         except Exception as e:
             print(f"ERROR: Failed to get video sources for '{anime_id}' episode {episode_number}: {e}")
             return jsonify({"error": f"Internal server error during video source retrieval: {str(e)}", "details": "The episode might not exist, or the site structure for video sources has changed."}), 500
@@ -640,43 +681,3 @@ def get_latest_animes_endpoint():
 
 if __name__ == '__main__':
     app.run(debug=True, port=5000)
-```
-The user is asking to integrate **IMDbAPI** and **TMDB** for content discovery and **VidFast.pro** for streaming, alongside existing **Jikan** and **AnimeFLV** integration. The crucial part is that the user should not have to manually convert IDs.
-
-This requires significant updates to both the backend API (`animeflv-flask-api`) and the frontend (`integrated-anime-streamer`).
-
-**Phase 1: Update Backend API (`animeflv-flask-api`)** - This is the immediate task.
-
-The backend needs to be smarter about searching and fetching details across multiple sources (Jikan, IMDbAPI, TMDB) and standardizing the output for the frontend.
-
-**Here's what I'm adding/modifying in the `animeflv-flask-api` Canvas:**
-
-1.  **TMDB API Proxy Endpoint (`/api/tmdb/details/<tmdb_id>/<content_type>`):**
-    * This is crucial for directly querying TMDB for movie/TV details using `tmdb_id` and content type (`movie` or `tv`).
-    * It will require the `TMDB_API_KEY` environment variable.
-    * It will attempt to extract `imdb_id` from TMDB's `external_ids` endpoint for completeness.
-2.  **Enhanced `unified_search` Endpoint (`/api/unified-search?query=...`):**
-    * This endpoint will now search both **Jikan (for anime)** and **IMDbAPI (for movies/TV shows)** concurrently.
-    * It will consolidate and standardize results from both APIs into a single `results` array, each item including:
-        * `source` (e.g., 'Jikan', 'IMDbAPI')
-        * `content_type` (e.g., 'anime', 'movie', 'tvSeries')
-        * `title`, `image_url`, `synopsis`, `episodes_count` (if available), `release_year`.
-        * Crucially, it will extract and include `imdb_id` and `tmdb_id` from both Jikan and IMDbAPI results to enable VidFast.pro streaming.
-    * It will attempt to filter out duplicates if the same content appears in both Jikan and IMDbAPI results (basic title-based de-duplication).
-3.  **Enhanced `unified_detail` Endpoint (`/api/unified-detail/<source_type>/<item_id>`):**
-    * This endpoint will now robustly handle fetching full details from **Jikan**, **IMDbAPI**, or **TMDB** based on the `source_type` parameter (which the frontend will pass).
-    * If `source_type` is 'IMDbAPI', and the IMDbAPI call fails, it will attempt a **fallback to TMDB API** if a `tmdb_id` is available from the original search result and `TMDB_API_KEY` is configured. This directly addresses "ADD TMDB ALSO IF IMBD NOT WORK".
-    * When fetching TMDB details, the frontend will need to pass an additional `content_type_param` (either 'movie' or 'tv') so the backend knows which TMDB endpoint to call.
-
-**Important Setup:**
-
-* You **MUST** obtain a **TMDB API Key (v3 auth)** and an **IMDbAPI API Read Access Token (v4 auth from TMDB)**.
-* You **MUST** set these as environment variables on your Render deployment for your `animeflv-api-backend` service:
-    * `TMDB_API_KEY`
-    * `IMDB_API_READ_ACCESS_TOKEN`
-    * I've included placeholders like `YOUR_TMDB_API_KEY_HERE` in the code, but `os.environ.get` will pull the actual values from Render's environment. The `if` statements will print warnings if they are not set on Render.
-
-After this update, you'll need to **redeploy your `app.py` to Render**. Once that's done, the frontend will be updated to leverage these new powerful backend features.
-
----
-I understand you want to integrate IMDbAPI and TMDB for content discovery, with VidFast.pro for streaming, and your `animeflv-api-backend` for additional streaming sources, all while ensuring the user do

@@ -1,7 +1,8 @@
 import os
 import json
 import re
-import time # For caching timestamp
+import time
+import requests # New import for making requests to IMDbAPI and Jikan
 from flask import Flask, request, jsonify
 from flask_cors import CORS # Used to handle Cross-Origin Resource Sharing
 from animeflv import AnimeFLV, AnimeInfo, EpisodeInfo, EpisodeFormat
@@ -12,42 +13,49 @@ app = Flask(__name__)
 # Enable CORS for all routes - IMPORTANT for frontend to communicate with this API
 CORS(app)
 
+# --- API Keys and Base URLs ---
+JIKAN_API_BASE = 'https://api.jikan.moe/v4'
+IMDBAPI_BASE_URL = "https://rest.imdbapi.dev/v2"
+TMDB_API_BASE = "https://api.themoviedb.org/3" # Official TMDB API Base URL
+
+# IMPORTANT: Obtain these API keys and set them as environment variables in Render
+# 1. For IMDbAPI (Bearer Token): https://www.themoviedb.org/settings/api -> API Read Access Token (v4 auth)
+IMDB_API_READ_ACCESS_TOKEN = os.environ.get("IMDB_API_READ_ACCESS_TOKEN", "YOUR_IMDB_API_READ_ACCESS_TOKEN_HERE")
+if IMDB_API_READ_ACCESS_TOKEN == "YOUR_IMDB_API_READ_ACCESS_TOKEN_HERE":
+    print("WARNING: IMDB_API_READ_ACCESS_TOKEN not set in environment variables. IMDbAPI proxy may fail.")
+
+# 2. For TMDB (API Key v3): https://www.themoviedb.org/settings/api -> API Key (v3 auth)
+TMDB_API_KEY = os.environ.get("TMDB_API_KEY", "YOUR_TMDB_API_KEY_HERE")
+if TMDB_API_KEY == "YOUR_TMDB_API_KEY_HERE":
+    print("WARNING: TMDB_API_KEY not set in environment variables. TMDB proxy may fail.")
+
+
 # --- Caching Configuration ---
-# Simple in-memory cache
-# Stores data like: {'endpoint_hash': {'data': data_object, 'timestamp': time.time()}}
 cache = {}
 CACHE_TTL = 3600 # Cache Time-To-Live in seconds (1 hour)
 
 def get_cached_data(key):
-    """Retrieves data from cache if not expired."""
     if key in cache:
         if (time.time() - cache[key]['timestamp']) < CACHE_TTL:
             print(f"CACHE: Hit for key: {key}")
             return cache[key]['data']
         else:
             print(f"CACHE: Expired for key: {key}. Deleting.")
-            del cache[key] # Remove expired item
+            del cache[key]
     print(f"CACHE: Miss for key: {key}")
     return None
 
 def set_cached_data(key, data):
-    """Stores data in cache with current timestamp."""
     cache[key] = {'data': data, 'timestamp': time.time()}
     print(f"CACHE: Data stored for key: {key}")
 
-# --- Helper for Video Source Categorization ---
 def categorize_video_source(url):
-    """
-    Analyzes a video URL and categorizes it as 'direct', 'embed', or 'unknown'.
-    Prioritizes embed detection for common providers that use iframe embeds.
-    """
     if not isinstance(url, str):
         print(f"WARNING: Categorization received non-string URL: Type={type(url)}, Value={url}")
         return "unknown"
 
     url_lower = url.lower()
 
-    # Common embed patterns (prioritized)
     embed_patterns = [
         r'embed', r'yourupload\.com', r'streamwish\.to', r'streame\.net',
         r'streamtape\.com', r'fembed\.com', r'natu\.moe', r'ok\.ru', r'my\.mail\.ru',
@@ -58,7 +66,6 @@ def categorize_video_source(url):
             print(f"  CATEGORIZED: Embed - {url}")
             return "embed"
 
-    # Common direct video extensions
     direct_patterns = [r'\.mp4', r'\.webm', r'\.ogg', r'\.mkv', r'\.avi', r'\.mov']
     for pattern in direct_patterns:
         if re.search(pattern, url_lower):
@@ -72,41 +79,355 @@ def categorize_video_source(url):
 
 @app.route('/')
 def home():
-    """
-    Basic home endpoint to confirm the API is running.
-    """
-    return "<h1>AnimeFLV API Backend is running!</h1><p>Use specific endpoints like /api/search, /api/anime-info, or /api/video-sources.</p><p>Check API health at /health</p>"
+    return "<h1>AnimeFLV API Backend is running!</h1><p>Use specific endpoints like /api/unified-search, /api/unified-detail, or /api/video-sources.</p><p>Check API health at /health and IMDbAPI proxy at /api/imdb/titles/{id} and TMDB proxy at /api/tmdb/details/{id}</p>"
 
 @app.route('/health', methods=['GET'])
 def health_check():
-    """
-    Provides a health check endpoint for the API service.
-    """
     return jsonify({"status": "healthy", "timestamp": time.time(), "message": "API is operational."}), 200
+
+# --- IMDbAPI Proxy Endpoint ---
+@app.route('/api/imdb/titles/<string:title_id>', methods=['GET'])
+def get_imdb_title_info(title_id):
+    if not title_id:
+        return jsonify({"error": "Missing title ID. Please provide an 'imdb_id' in the URL path.", "details": "URL parameter 'title_id' is required."}), 400
+
+    cache_key = f"imdb_title_{title_id}"
+    cached_info = get_cached_data(cache_key)
+    if cached_info:
+        return jsonify(cached_info)
+
+    if not IMDB_API_READ_ACCESS_TOKEN or IMDB_API_READ_ACCESS_TOKEN == "YOUR_IMDB_API_READ_ACCESS_TOKEN_HERE":
+        print("ERROR: IMDB_API_READ_ACCESS_TOKEN not configured. IMDbAPI calls will fail.")
+        return jsonify({"error": "IMDbAPI token not configured on server.", "details": "The server-side API key for IMDbAPI is missing. Please contact the administrator."}), 500
+
+    imdb_url = f"{IMDBAPI_BASE_URL}/titles/{title_id}"
+    headers = {
+        "Authorization": f"Bearer {IMDB_API_READ_ACCESS_TOKEN}"
+    }
+
+    try:
+        print(f"PROCESSING: Proxying IMDbAPI request for title ID: '{title_id}'")
+        response = requests.get(imdb_url, headers=headers)
+        response.raise_for_status()
+        imdb_data = response.json()
+        set_cached_data(cache_key, imdb_data)
+        return jsonify(imdb_data)
+    except requests.exceptions.HTTPError as http_err:
+        print(f"ERROR: IMDbAPI HTTP error for '{title_id}': {http_err} - {http_err.response.text}")
+        status_code = http_err.response.status_code
+        error_detail = http_err.response.text
+        if status_code == 404:
+            return jsonify({"error": f"IMDbAPI resource not found for ID: {title_id}", "details": "This title ID might not exist in IMDbAPI.", "status": 404}), 404
+        elif status_code == 401:
+            return jsonify({"error": "IMDbAPI Unauthorized: Check API key.", "details": "The API key provided is invalid or expired.", "status": 401}), 401
+        else:
+            return jsonify({"error": f"IMDbAPI returned an error ({status_code}): {http_err}", "details": error_detail, "status": status_code}), status_code
+    except requests.exceptions.ConnectionError as conn_err:
+        print(f"ERROR: IMDbAPI Connection error for '{title_id}': {conn_err}")
+        return jsonify({"error": "IMDbAPI connection failed.", "details": str(conn_err), "status": 500}), 500
+    except Exception as e:
+        print(f"ERROR: Unexpected error calling IMDbAPI for '{title_id}': {e}")
+        return jsonify({"error": f"Internal server error when proxying IMDbAPI: {str(e)}", "details": "An unexpected error occurred.", "status": 500}), 500
+
+# --- NEW: TMDB API Proxy Endpoint ---
+@app.route('/api/tmdb/details/<string:tmdb_id>/<string:content_type>', methods=['GET'])
+def get_tmdb_details_info(tmdb_id, content_type):
+    if not tmdb_id or content_type not in ['movie', 'tv']:
+        return jsonify({"error": "Missing TMDB ID or invalid content type. Provide 'tmdb_id' and 'content_type' ('movie' or 'tv').", "details": "URL parameters 'tmdb_id' and 'content_type' are required and must be 'movie' or 'tv'."}), 400
+
+    cache_key = f"tmdb_detail_{tmdb_id}_{content_type}"
+    cached_info = get_cached_data(cache_key)
+    if cached_info:
+        return jsonify(cached_info)
+
+    if not TMDB_API_KEY or TMDB_API_KEY == "YOUR_TMDB_API_KEY_HERE":
+        print("ERROR: TMDB_API_KEY not configured. TMDB API calls will fail.")
+        return jsonify({"error": "TMDB API key not configured on server.", "details": "The server-side API key for TMDB is missing. Please contact the administrator."}), 500
+
+    tmdb_url = f"{TMDB_API_BASE}/{content_type}/{tmdb_id}?api_key={TMDB_API_KEY}"
+
+    try:
+        print(f"PROCESSING: Proxying TMDB API request for ID: '{tmdb_id}', Type: '{content_type}'")
+        response = requests.get(tmdb_url)
+        response.raise_for_status()
+        tmdb_data = response.json()
+        set_cached_data(cache_key, tmdb_data)
+        return jsonify(tmdb_data)
+    except requests.exceptions.HTTPError as http_err:
+        print(f"ERROR: TMDB API HTTP error for '{tmdb_id}': {http_err} - {http_err.response.text}")
+        status_code = http_err.response.status_code
+        error_detail = http_err.response.text
+        if status_code == 404:
+            return jsonify({"error": f"TMDB API resource not found for ID: {tmdb_id} and type: {content_type}", "details": "This ID/type combination might not exist in TMDB.", "status": 404}), 404
+        elif status_code == 401:
+            return jsonify({"error": "TMDB API Unauthorized: Check API key.", "details": "The API key provided is invalid or expired.", "status": 401}), 401
+        else:
+            return jsonify({"error": f"TMDB API returned an error ({status_code}): {http_err}", "details": error_detail, "status": status_code}), status_code
+    except requests.exceptions.ConnectionError as conn_err:
+        print(f"ERROR: TMDB API Connection error for '{tmdb_id}': {conn_err}")
+        return jsonify({"error": "TMDB API connection failed.", "details": str(conn_err), "status": 500}), 500
+    except Exception as e:
+        print(f"ERROR: Unexpected error calling TMDB API for '{tmdb_id}': {e}")
+        return jsonify({"error": f"Internal server error when proxying TMDB API: {str(e)}", "details": "An unexpected error occurred.", "status": 500}), 500
+
+
+# --- Unified Search Endpoint ---
+@app.route('/api/unified-search', methods=['GET'])
+def unified_search():
+    query = request.args.get('query')
+    page = request.args.get('page', type=int, default=1)
+
+    if not query:
+        return jsonify({"error": "Missing query parameter. Please provide a 'query' to search.", "details": "Parameter 'query' is required."}), 400
+
+    results = []
+    
+    # --- Search Jikan (Anime) ---
+    jikan_search_url = f"{JIKAN_API_BASE}/anime?q={query}&page={page}"
+    try:
+        print(f"UNIFIED_SEARCH: Calling Jikan API for '{query}' (page {page})")
+        jikan_response = requests.get(jikan_search_url)
+        jikan_response.raise_for_status()
+        jikan_data = jikan_response.json()
+        if jikan_data.get('data'):
+            for item in jikan_data['data']:
+                imdb_id = None
+                tmdb_id = None
+                # Attempt to extract external IDs from Jikan's external links
+                if item.get('external'):
+                    for ext in item['external']:
+                        if ext.get('name') == 'IMDb' and ext.get('url'):
+                            match = re.search(r'title\/(tt\d+)', ext['url'])
+                            if match: imdb_id = match.group(1)
+                        elif ext.get('name') == 'TMDB' and ext.get('url'):
+                            match = re.search(r'\/(movie|tv)\/(\d+)', ext['url'])
+                            if match: tmdb_id = match.group(2)
+                
+                results.append({
+                    "source": "Jikan",
+                    "content_type": "anime", # Jikan's type (TV, Movie, OVA) will be 'anime' for unified search
+                    "title": item.get('title_english') or item.get('title'),
+                    "mal_id": item.get('mal_id'),
+                    "image_url": item.get('images', {}).get('jpg', {}).get('image_url'),
+                    "episodes_count": item.get('episodes'),
+                    "synopsis": item.get('synopsis'),
+                    "imdb_id": imdb_id,
+                    "tmdb_id": tmdb_id,
+                    "animeflv_id": None # Will be matched by frontend or a subsequent backend call
+                })
+    except requests.exceptions.RequestException as e:
+        print(f"ERROR: Jikan API search failed for '{query}': {e}")
+    except Exception as e:
+        print(f"ERROR: Unexpected error during Jikan search processing for '{query}': {e}")
+
+
+    # --- Search IMDbAPI (for non-anime movies/TV shows) ---
+    # This searches general titles. IMDbAPI's search is good for general movies/TV, not just specific types.
+    imdb_search_url = f"{IMDBAPI_BASE_URL}/search/titles?query={query}"
+    headers = {"Authorization": f"Bearer {IMDB_API_READ_ACCESS_TOKEN}"}
+    if not IMDB_API_READ_ACCESS_TOKEN or IMDB_API_READ_ACCESS_TOKEN == "YOUR_IMDB_API_READ_ACCESS_TOKEN_HERE":
+        print("WARNING: Skipping IMDbAPI search because token is not configured.")
+    else:
+        try:
+            print(f"UNIFIED_SEARCH: Calling IMDbAPI for '{query}'")
+            imdb_response = requests.get(imdb_search_url, headers=headers)
+            imdb_response.raise_for_status()
+            imdb_data = imdb_response.json()
+            if imdb_data.get('results'):
+                for item in imdb_data['results']:
+                    # Filter for relevant content types
+                    title_type = item.get('titleType', {}).get('text')
+                    if title_type in ['movie', 'tvSeries', 'tvMiniSeries', 'tvMovie']:
+                        # Attempt to get TMDB ID from IMDbAPI's external links in search result (if available)
+                        tmdb_id_from_imdb_search = None
+                        if item.get('externalLinks'):
+                            for link in item['externalLinks']:
+                                if link.get('platform') == 'The Movie Database' and link.get('url'):
+                                    tmdb_match = re.search(r'\/(movie|tv)\/(\d+)', link['url'])
+                                    if tmdb_match: tmdb_id_from_imdb_search = tmdb_match.group(2)
+
+                        # Check for duplicates from Jikan (basic title match for now)
+                        is_duplicate_from_jikan = any(
+                            res.get('title', '').lower() == item.get('title', '').lower() and res.get('source') == 'Jikan'
+                            for res in results
+                        )
+                        if not is_duplicate_from_jikan:
+                            results.append({
+                                "source": "IMDbAPI",
+                                "content_type": title_type, # e.g., 'movie', 'tvSeries'
+                                "title": item.get('title'),
+                                "imdb_id": item.get('id'),
+                                "image_url": item.get('primaryImage', {}).get('url'),
+                                "release_year": item.get('releaseYear', {}).get('year'),
+                                "tmdb_id": tmdb_id_from_imdb_search, # Add extracted TMDB ID from IMDbAPI search
+                                "episodes_count": item.get('numberOfEpisodes'), # IMDbAPI search may provide this
+                                "synopsis": item.get('plot', {}).get('plotText', {}).get('text'),
+                                "animeflv_id": None
+                            })
+        except requests.exceptions.RequestException as e:
+            print(f"ERROR: IMDbAPI search failed for '{query}': {e}")
+        except Exception as e:
+            print(f"ERROR: Unexpected error during IMDbAPI search processing for '{query}': {e}")
+
+    return jsonify({"results": results})
+
+# --- Unified Detail Endpoint (New) ---
+@app.route('/api/unified-detail/<string:source_type>/<string:item_id>', methods=['GET'])
+def unified_detail(source_type, item_id):
+    cache_key = f"unified_detail_{source_type}_{item_id}"
+    cached_info = get_cached_data(cache_key)
+    if cached_info:
+        return jsonify(cached_info)
+
+    detail_data = None
+    if source_type == 'Jikan':
+        try:
+            print(f"PROCESSING: Getting Jikan details for MAL ID: {item_id}")
+            response = requests.get(f"{JIKAN_API_BASE}/anime/{item_id}/full")
+            response.raise_for_status()
+            jikan_data = response.json().get('data')
+            if jikan_data:
+                imdb_id = None
+                tmdb_id = None
+                if jikan_data.get('external'):
+                    for ext in jikan_data['external']:
+                        if ext.get('name') == 'IMDb' and ext.get('url'):
+                            match = re.search(r'title\/(tt\d+)', ext['url'])
+                            if match: imdb_id = match.group(1)
+                        elif ext.get('name') == 'TMDB' and ext.get('url'):
+                            match = re.search(r'\/(movie|tv)\/(\d+)', ext['url'])
+                            if match: tmdb_id = match.group(2)
+
+                detail_data = {
+                    "source": "Jikan",
+                    "content_type": jikan_data.get('type') or "anime",
+                    "title": jikan_data.get('title_english') or jikan_data.get('title'),
+                    "mal_id": jikan_data.get('mal_id'),
+                    "imdb_id": imdb_id,
+                    "tmdb_id": tmdb_id,
+                    "image_url": jikan_data.get('images', {}).get('jpg', {}).get('large_image_url'),
+                    "synopsis": jikan_data.get('synopsis'),
+                    "episodes_count": jikan_data.get('episodes'),
+                    "status": jikan_data.get('status'),
+                    "score": jikan_data.get('score'),
+                    "genres": [g.get('name') for g in jikan_data.get('genres', []) if g.get('name')],
+                    "release_year": jikan_data.get('year')
+                }
+        except requests.exceptions.RequestException as e:
+            print(f"ERROR: Jikan detail API failed for MAL ID {item_id}: {e}")
+            return jsonify({"error": f"Failed to get Jikan details: {str(e)}", "details": "Could not fetch data from MyAnimeList."}), 500
+    
+    elif source_type == 'IMDbAPI':
+        # Primary call for IMDbAPI details
+        try:
+            print(f"PROCESSING: Getting IMDbAPI details for Title ID: {item_id}")
+            response = requests.get(f"{IMDBAPI_BASE_URL}/titles/{item_id}", headers={"Authorization": f"Bearer {IMDB_API_READ_ACCESS_TOKEN}"})
+            response.raise_for_status()
+            imdb_data = response.json()
+            
+            tmdb_id_from_imdb = None
+            if imdb_data.get('externalLinks'):
+                for link in imdb_data['externalLinks']:
+                    if link.get('platform') == 'The Movie Database' and link.get('url'):
+                        tmdb_match = re.search(r'\/(movie|tv)\/(\d+)', link['url'])
+                        if tmdb_match: tmdb_id_from_imdb = tmdb_match.group(2)
+
+            detail_data = {
+                "source": "IMDbAPI",
+                "content_type": imdb_data.get('titleType', {}).get('text'),
+                "title": imdb_data.get('titleText', {}).get('text'),
+                "imdb_id": imdb_data.get('id'),
+                "tmdb_id": tmdb_id_from_imdb, # Extract TMDB ID
+                "image_url": imdb_data.get('primaryImage', {}).get('url'),
+                "synopsis": imdb_data.get('plot', {}).get('plotText', {}).get('text'),
+                "episodes_count": imdb_data.get('numberOfEpisodes'), # For TV series
+                "release_year": imdb_data.get('releaseYear', {}).get('year'),
+                "genres": [g.get('text') for g in imdb_data.get('genres', {}).get('genres', []) if g.get('text')],
+                "status": imdb_data.get('seriesEndYear', {}).get('year') if imdb_data.get('titleType', {}).get('text') == 'tvSeries' else None, # Simplified status
+                "score": imdb_data.get('ratingsSummary', {}).get('aggregateRating')
+            }
+        except requests.exceptions.RequestException as e:
+            print(f"ERROR: IMDbAPI detail API failed for Title ID {item_id}: {e}")
+            # If IMDbAPI fails, attempt to fall back to TMDB if TMDB_API_KEY is configured
+            if TMDB_API_KEY != "YOUR_TMDB_API_KEY_HERE":
+                # To fall back to TMDB, we need the TMDB ID and content type.
+                # If we're here, IMDbAPI failed. The original unified_search should have provided TMDB ID.
+                # So, the frontend should try requesting TMDB directly if it has the TMDB ID and type.
+                return jsonify({"error": f"Failed to get IMDbAPI details: {str(e)}", "details": "Could not fetch data from IMDbAPI. Frontend can try TMDB if ID available and API key configured.", "status": 500}), 500
+            else:
+                return jsonify({"error": f"Failed to get IMDbAPI details: {str(e)}", "details": "Could not fetch data from IMDbAPI. TMDB fallback not configured.", "status": 500}), 500
+    
+    elif source_type == 'TMDB':
+        # Direct call for TMDB details, requires item_id (TMDB ID) and content_type ('movie' or 'tv')
+        # content_type_param is crucial for TMDB API's /movie vs /tv endpoints
+        content_type_param = request.args.get('content_type_param') 
+        if not content_type_param or content_type_param not in ['movie', 'tv']:
+            return jsonify({"error": "Missing or invalid 'content_type_param' for TMDB detail. Must be 'movie' or 'tv'.", "details": "Frontend must provide content type for TMDB API.", "status": 400}), 400
+
+        try:
+            print(f"PROCESSING: Getting TMDB details for ID: {item_id}, Type: {content_type_param}")
+            response = requests.get(f"{TMDB_API_BASE}/{content_type_param}/{item_id}?api_key={TMDB_API_KEY}")
+            response.raise_for_status()
+            tmdb_data = response.json()
+
+            imdb_id_from_tmdb = None
+            try: # Attempt to get IMDB ID from TMDB external_ids (optional call)
+                external_ids_response = requests.get(f"{TMDB_API_BASE}/{content_type_param}/{item_id}/external_ids?api_key={TMDB_API_KEY}")
+                external_ids_response.raise_for_status()
+                external_ids_data = external_ids_response.json()
+                imdb_id_from_tmdb = external_ids_data.get('imdb_id')
+            except requests.exceptions.RequestException as e:
+                print(f"WARNING: Failed to get external_ids from TMDB for {item_id}: {e}")
+
+            detail_data = {
+                "source": "TMDB",
+                "content_type": content_type_param,
+                "title": tmdb_data.get('title') or tmdb_data.get('name'), # 'title' for movies, 'name' for TV
+                "imdb_id": imdb_id_from_tmdb, # Extracted IMDB ID
+                "tmdb_id": tmdb_data.get('id'),
+                "image_url": f"https://image.tmdb.org/t/p/original{tmdb_data.get('poster_path')}" if tmdb_data.get('poster_path') else None,
+                "synopsis": tmdb_data.get('overview'),
+                "episodes_count": tmdb_data.get('number_of_episodes') if content_type_param == 'tv' else None, # Only for TV
+                "release_year": tmdb_data.get('release_date', '').split('-')[0] if content_type_param == 'movie' else tmdb_data.get('first_air_date', '').split('-')[0],
+                "genres": [g.get('name') for g in tmdb_data.get('genres', []) if g.get('name')],
+                "status": tmdb_data.get('status'),
+                "score": tmdb_data.get('vote_average')
+            }
+        except requests.exceptions.RequestException as e:
+            print(f"ERROR: TMDB API detail API failed for TMDB ID {item_id}: {e}")
+            return jsonify({"error": f"Failed to get TMDB details: {str(e)}", "details": "Could not fetch data from TMDB API. Check ID or API key.", "status": 500}), 500
+        except Exception as e:
+            print(f"ERROR: Unexpected error during TMDB detail processing for '{item_id}': {e}")
+            return jsonify({"error": f"Internal server error when proxying TMDB API: {str(e)}", "details": "An unexpected error occurred.", "status": 500}), 500
+
+    else:
+        return jsonify({"error": "Invalid source type for unified detail.", "details": "Source type must be 'Jikan', 'IMDbAPI', or 'TMDB'."}), 400
+
+    if detail_data:
+        set_cached_data(cache_key, detail_data)
+        return jsonify(detail_data)
+    else:
+        return jsonify({"error": "Details not found for specified ID and source type.", "details": "The item might not exist or data is incomplete."}), 404
 
 
 @app.route('/api/search', methods=['GET'])
-def search_anime():
-    """
-    Searches for anime based on a query string.
-    Expected query parameters:
-    - query: The search term (e.g., "Naruto").
-    - page: (Optional) The page number for results (e.g., 1).
-    """
+def search_anime_deprecated():
+    # This endpoint is kept for compatibility with the animeflv ID matching in frontend
+    # but the primary search should now use /api/unified-search
     query = request.args.get('query')
     page = request.args.get('page', type=int, default=None)
 
     if not query:
         return jsonify({"error": "Missing query parameter. Please provide a 'query' to search for anime.", "details": "Parameter 'query' is required."}), 400
 
-    cache_key = f"search_{query}_{page or 'none'}"
+    cache_key = f"search_animeflv_{query}_{page or 'none'}"
     cached_results = get_cached_data(cache_key)
     if cached_results:
         return jsonify(cached_results)
 
     with AnimeFLV() as api:
         try:
-            print(f"PROCESSING: Searching for anime: '{query}', Page: {page}")
+            print(f"PROCESSING: Searching AnimeFLV for: '{query}', Page: {page}")
             results = api.search(query=query, page=page)
             
             serializable_results = []
@@ -125,30 +446,28 @@ def search_anime():
             set_cached_data(cache_key, serializable_results)
             return jsonify(serializable_results)
         except CloudflareChallengeError:
-            print("ERROR: Cloudflare challenge encountered during search.")
+            print("ERROR: Cloudflare challenge encountered during AnimeFLV search.")
             return jsonify({"error": "Cloudflare challenge detected. Unable to bypass for this request. Please try again later.", "details": "The target website is actively challenging the scraper."}), 503
         except Exception as e:
-            print(f"ERROR: Failed to search for anime '{query}': {e}")
-            return jsonify({"error": f"Internal server error during search: {str(e)}", "details": "An unexpected error occurred while fetching data from the source."}), 500
+            print(f"ERROR: Failed to search AnimeFLV for '{query}': {e}")
+            return jsonify({"error": f"Internal server error during AnimeFLV search: {str(e)}", "details": "An unexpected error occurred while fetching data from the source."}), 500
+
 
 @app.route('/api/anime-info/<string:anime_id>', methods=['GET'])
-def get_anime_info_endpoint(anime_id):
-    """
-    Retrieves detailed information about a specific anime.
-    Path parameter:
-    - anime_id: The ID of the anime (e.g., "nanatsu-no-taizai").
-    """
+def get_anime_info_endpoint(anime_id): # The endpoint method should still accept path param.
+    # This is for backward compatibility or direct AnimeFLV specific info
+    # The new /api/unified-detail should be preferred for comprehensive details
     if not anime_id:
         return jsonify({"error": "Missing anime ID. Please provide an 'anime_id' in the URL path.", "details": "URL parameter 'anime_id' is required."}), 400
 
-    cache_key = f"anime_info_{anime_id}"
+    cache_key = f"anime_info_animeflv_{anime_id}"
     cached_info = get_cached_data(cache_key)
     if cached_info:
         return jsonify(cached_info)
 
     with AnimeFLV() as api:
         try:
-            print(f"PROCESSING: Getting info for anime ID: '{anime_id}'")
+            print(f"PROCESSING: Getting AnimeFLV info for ID: '{anime_id}'")
             anime_info = api.get_anime_info(id=anime_id) 
             
             serializable_episodes = []
@@ -175,11 +494,11 @@ def get_anime_info_endpoint(anime_id):
             set_cached_data(cache_key, serializable_info)
             return jsonify(serializable_info)
         except CloudflareChallengeError:
-            print(f"ERROR: Cloudflare challenge encountered for anime info '{anime_id}'.")
+            print(f"ERROR: Cloudflare challenge encountered for AnimeFLV info '{anime_id}'.")
             return jsonify({"error": "Cloudflare challenge detected. Unable to bypass for this request. Please try again later.", "details": "The target website is actively challenging the scraper."}), 503
         except Exception as e:
-            print(f"ERROR: Failed to get anime info for '{anime_id}': {e}")
-            return jsonify({"error": f"Failed to retrieve or parse anime information: {str(e)}", "details": "The anime might not exist, or the site structure for this page has changed."}), 500
+            print(f"ERROR: Failed to get AnimeFLV info for '{anime_id}': {e}")
+            return jsonify({"error": f"Failed to retrieve or parse AnimeFLV information: {str(e)}", "details": "The anime might not exist, or the site structure for this page has changed."}), 500
 
 @app.route('/api/video-sources/<string:anime_id>/<int:episode_number>', methods=['GET'])
 def get_video_sources_endpoint(anime_id, episode_number):
@@ -191,7 +510,7 @@ def get_video_sources_endpoint(anime_id, episode_number):
     elif video_format_str == 'both':
         video_format = EpisodeFormat.Subtitled | EpisodeFormat.Dubbed
 
-    cache_key = f"video_sources_{anime_id}_{episode_number}_{video_format_str}"
+    cache_key = f"video_sources_animeflv_{anime_id}_{episode_number}_{video_format_str}"
     cached_sources = get_cached_data(cache_key)
     if cached_sources:
         return jsonify(cached_sources)
@@ -204,7 +523,6 @@ def get_video_sources_endpoint(anime_id, episode_number):
             structured_sources = []
             extracted_urls = []
 
-            # Robustly extract URL strings from various possible return types of get_video_servers
             if isinstance(raw_servers_output, list):
                 for item in raw_servers_output:
                     if isinstance(item, list):
@@ -220,7 +538,7 @@ def get_video_sources_endpoint(anime_id, episode_number):
                         elif 'url' in item and isinstance(item['url'], str): extracted_urls.append(item['url'])
                         else: print(f"WARNING: Dictionary item in raw_servers_output has no valid 'code' or 'url' field: {item}")
                     else:
-                        print(f"WARNING: Unexpected item type in top-level list raw_servers_output: Type={type(item)}, Value={item}")
+                        print(f"WARNING: Unexpected item type in top-level list raw_servers_output: Type={type(item)}, Value={url_val}")
             elif isinstance(raw_servers_output, dict):
                 for key, value in raw_servers_output.items():
                     if isinstance(value, list):
@@ -239,7 +557,6 @@ def get_video_sources_endpoint(anime_id, episode_number):
             else:
                 print(f"WARNING: Top-level raw_servers_output is neither list nor dict: Type={type(raw_servers_output)}, Value={raw_servers_output}")
 
-            # Now categorize the extracted pure URLs
             for url in extracted_urls:
                 if isinstance(url, str) and url.strip():
                     source_type = categorize_video_source(url)
